@@ -1,230 +1,261 @@
-import { WorkflowSpec, WorkflowInput, LegacyWorkflowConnection, ConnectionMap } from '../types/workflow';
-import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import Joi from 'joi';
+import { WorkflowSpec, WorkflowInput, LegacyWorkflowConnection } from '../types/workflow';
+import logger from './logger';
+
+// Security validation schemas
+export const validationSchemas = {
+  // Workflow creation validation
+  createWorkflow: Joi.object({
+    name: Joi.string()
+      .min(1)
+      .max(255)
+      .pattern(/^[a-zA-Z0-9\s\-_]+$/)
+      .required()
+      .messages({
+        'string.pattern.base': 'Workflow name can only contain alphanumeric characters, spaces, hyphens, and underscores'
+      }),
+    
+    nodes: Joi.array()
+      .min(1)
+      .max(100)
+      .items(
+        Joi.object({
+          type: Joi.string()
+            .pattern(/^[a-zA-Z0-9\-\.]+$/)
+            .required()
+            .messages({
+              'string.pattern.base': 'Node type must be a valid n8n node type identifier'
+            }),
+          name: Joi.string()
+            .min(1)
+            .max(100)
+            .pattern(/^[a-zA-Z0-9\s\-_]+$/)
+            .required()
+            .messages({
+              'string.pattern.base': 'Node name can only contain alphanumeric characters, spaces, hyphens, and underscores'
+            }),
+          parameters: Joi.object().default({}),
+          id: Joi.string().optional(),
+          position: Joi.array().items(Joi.number()).length(2).optional()
+        })
+      )
+      .required(),
+    
+    connections: Joi.array()
+      .min(0)
+      .max(1000)
+      .items(
+        Joi.object({
+          source: Joi.string()
+            .min(1)
+            .max(100)
+            .pattern(/^[a-zA-Z0-9\s\-_]+$/)
+            .required(),
+          target: Joi.string()
+            .min(1)
+            .max(100)
+            .pattern(/^[a-zA-Z0-9\s\-_]+$/)
+            .required(),
+          sourceOutput: Joi.number().integer().min(0).max(10).default(0),
+          targetInput: Joi.number().integer().min(0).max(10).default(0)
+        })
+      )
+      .required(),
+    
+    instance: Joi.string()
+      .pattern(/^[a-zA-Z0-9\-_]+$/)
+      .optional()
+      .messages({
+        'string.pattern.base': 'Instance name can only contain alphanumeric characters, hyphens, and underscores'
+      })
+  }),
+
+  // Workflow ID validation
+  workflowId: Joi.string()
+    .pattern(/^[a-zA-Z0-9\-]+$/)
+    .required()
+    .messages({
+      'string.pattern.base': 'Workflow ID must be a valid identifier'
+    }),
+
+  // Execution ID validation
+  executionId: Joi.number()
+    .integer()
+    .positive()
+    .required(),
+
+  // Tag validation
+  tagData: Joi.object({
+    name: Joi.string()
+      .min(1)
+      .max(50)
+      .pattern(/^[a-zA-Z0-9\s\-_]+$/)
+      .required()
+      .messages({
+        'string.pattern.base': 'Tag name can only contain alphanumeric characters, spaces, hyphens, and underscores'
+      })
+  }),
+
+  // Instance name validation
+  instanceName: Joi.string()
+    .pattern(/^[a-zA-Z0-9\-_]+$/)
+    .optional()
+    .messages({
+      'string.pattern.base': 'Instance name can only contain alphanumeric characters, hyphens, and underscores'
+    }),
+
+  // Pagination validation
+  pagination: Joi.object({
+    limit: Joi.number().integer().min(1).max(1000).optional(),
+    cursor: Joi.string().max(1000).optional(),
+    includeData: Joi.boolean().optional(),
+    status: Joi.string().valid('error', 'success', 'waiting').optional(),
+    workflowId: Joi.string().pattern(/^[a-zA-Z0-9\-]+$/).optional(),
+    projectId: Joi.string().pattern(/^[a-zA-Z0-9\-]+$/).optional()
+  })
+};
 
 /**
- * Validates and transforms workflow input data into a format accepted by the n8n API
+ * Validate input data against a schema
  */
-export function validateWorkflowSpec(input: WorkflowInput): WorkflowSpec {
-  if (!input || typeof input !== 'object') {
-    throw new McpError(ErrorCode.InvalidParams, 'Workflow spec must be an object');
-  }
-  
-  if (!Array.isArray(input.nodes)) {
-    throw new McpError(ErrorCode.InvalidParams, 'Workflow nodes must be an array');
-  }
-  
-  if (!Array.isArray(input.connections)) {
-    throw new McpError(ErrorCode.InvalidParams, 'Workflow connections must be an array');
-  }
-  
-  if (input.connections.length === 0) {
-    throw new McpError(ErrorCode.InvalidParams, 'Workflow connections array cannot be empty. Nodes must be connected.');
-  }
-  
-  // Check and transform nodes
-  const formattedNodes = (input.nodes || []).map((node, index) => {
-    if (typeof node !== 'object' || typeof node.type !== 'string' || typeof node.name !== 'string') {
-      throw new McpError(ErrorCode.InvalidParams, 'Each node must have a type and name');
-    }
-    
-    // Generate ID if it doesn't exist
-    const nodeId = node.id || `node_${index + 1}`;
-    
-    // If this is a Set type node, structure parameters according to n8n API expectations
-    if (node.type === 'n8n-nodes-base.set' && node.parameters && node.parameters.values) {
-      let formattedValues: any[] = [];
-      
-      // Handle case when values is an object with type arrays (n8n 1.82.3+ structure)
-      if (!Array.isArray(node.parameters.values) && typeof node.parameters.values === 'object') {
-        // Перебираем все типы данных (string, number, boolean и т.д.)
-        Object.entries(node.parameters.values).forEach(([type, valuesArray]) => {
-          if (Array.isArray(valuesArray)) {
-            // Добавляем все значения в общий массив с указанным типом
-            valuesArray.forEach((value: any) => {
-              formattedValues.push({
-                name: value.name,
-                value: value.value,
-                type: type,
-                parameterType: 'propertyValue'
-              });
-            });
-          }
-        });
-      } 
-      // Handle case when values is already an array (legacy structure)
-      else if (Array.isArray(node.parameters.values)) {
-        formattedValues = node.parameters.values.map((value: any) => {
-          return {
-            name: value.name,
-            value: value.value,
-            type: value.type || 'string',
-            parameterType: 'propertyValue'
-          };
-        });
-      }
-      
-      // Completely redefine the parameters for the Set node
-      node.parameters = {
-        values: formattedValues,
-        options: {
-          dotNotation: true
-        },
-        mode: 'manual'
-      };
-    }
-    
-    // Create a properly formatted node
-    return {
-      id: nodeId,
-      name: node.name,
-      type: node.type,
-      parameters: node.parameters || {},
-      position: node.position || [index * 200, 300], // Position nodes horizontally with a step of 200
-      typeVersion: 1
-    };
+export function validateInput<T>(data: any, schema: Joi.Schema): T {
+  const { error, value } = schema.validate(data, {
+    abortEarly: false,
+    stripUnknown: true,
+    convert: true
   });
-  
-  // Create a dictionary of nodes by ID for quick access
-  const nodeDict: Record<string, { id: string; name: string; index: number }> = {};
-  formattedNodes.forEach((node, index) => {
-    nodeDict[node.id] = { id: node.id, name: node.name, index };
-  });
-  
-  // Transform connections to n8n format
-  let connections: ConnectionMap = {};
-  
-  if (input.connections && Array.isArray(input.connections)) {
-    input.connections.forEach((conn: LegacyWorkflowConnection) => {
-      // Find nodes by name if source and target are node names
-      const sourceNode = findNodeByNameOrId(formattedNodes, conn.source);
-      const targetNode = findNodeByNameOrId(formattedNodes, conn.target);
-      
-      if (!sourceNode) {
-        throw new McpError(ErrorCode.InvalidParams, `Connection references non-existent source node: "${conn.source}"`);
-      }
-      
-      if (!targetNode) {
-        throw new McpError(ErrorCode.InvalidParams, `Connection references non-existent target node: "${conn.target}"`);
-      }
-      
-      // Используем имя узла в качестве ключа для соединений
-      if (!connections[sourceNode.name]) {
-        connections[sourceNode.name] = { main: [] };
-      }
-      
-      // Make sure the array for sourceOutput exists
-      const sourceOutput = conn.sourceOutput || 0;
-      while (connections[sourceNode.name].main.length <= sourceOutput) {
-        connections[sourceNode.name].main.push([]);
-      }
-      
-      // Используем имя целевого узла для target
-      connections[sourceNode.name].main[sourceOutput].push({
-        node: targetNode.name,
-        type: 'main',
-        index: conn.targetInput || 0
-      });
-    });
-  } else {
-    throw new McpError(ErrorCode.InvalidParams, 'Workflow connections are missing or invalid. Please provide a valid connections array.');
+
+  if (error) {
+    const errorMessage = error.details.map(detail => detail.message).join('; ');
+    logger.warn(`Input validation failed: ${errorMessage}`);
+    throw new Error(`Invalid input: ${errorMessage}`);
   }
-  
-  // Проверка на некорректные ключи соединений
-  Object.keys(connections).forEach(nodeKey => {
-    const matchingNode = formattedNodes.find(node => node.name === nodeKey);
-    if (!matchingNode) {
-      if (process.env.DEBUG === 'true') {
-        console.error(`Warning: Found connection with invalid node name "${nodeKey}". Removing this connection.`);
-      }
-      delete connections[nodeKey];
-    }
-  });
-  
-  // Default settings
-  const defaultSettings = { executionOrder: 'v1' };
-  const mergedSettings = input.settings 
-    ? { ...defaultSettings, ...input.settings } 
-    : defaultSettings;
-  
-  // Return the formatted workflow specification
-  return {
-    name: input.name || 'New Workflow',
-    nodes: formattedNodes,
-    connections: connections,
-    settings: mergedSettings
-  };
+
+  return value;
 }
 
 /**
- * Finds a node by name or ID, prioritizing ID matching
+ * Sanitize string input to prevent injection attacks
  */
-function findNodeByNameOrId(nodes: Array<any>, nameOrId: string): any {
-  // Сначала ищем точное совпадение по ID
-  const nodeById = nodes.find(node => node.id === nameOrId);
-  if (nodeById) {
-    return nodeById;
+export function sanitizeString(input: string): string {
+  if (typeof input !== 'string') {
+    throw new Error('Input must be a string');
   }
   
-  // Если не нашли по ID, ищем по имени
-  const nodeByName = nodes.find(node => node.name === nameOrId);
-  if (nodeByName) {
-    // Используем console.error вместо console.log для записи в stderr, а не stdout
-    // и не мешаем JSON-ответу
-    if (process.env.DEBUG === 'true') {
-      console.error(`Note: Found node "${nameOrId}" by name instead of ID. Using node ID: ${nodeByName.id}`);
-    }
-    return nodeByName;
-  }
-  
-  // Не нашли узел
-  return null;
+  // Remove potentially dangerous characters
+  return input
+    .replace(/[<>'"&]/g, '') // Remove HTML/XML special characters
+    .replace(/[`${}]/g, '') // Remove template literal and object notation characters
+    .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
+    .trim();
 }
 
 /**
- * Transforms connections from n8n object format to array format
- * This is used when we need to send connections to an endpoint that expects an array
+ * Validate and sanitize workflow input
  */
-export function transformConnectionsToArray(connections: ConnectionMap | any): LegacyWorkflowConnection[] {
-  // If it's already an array, return it
-  if (Array.isArray(connections)) {
-    return connections;
-  }
+export function validateWorkflowInput(input: any): WorkflowInput {
+  // First validate structure
+  const validated = validateInput<WorkflowInput>(input, validationSchemas.createWorkflow);
   
-  // If it's not an object or is null/undefined, return an empty array
-  if (!connections || typeof connections !== 'object') {
-    return [];
-  }
-  
-  // Transform from object format to array format
-  const result: LegacyWorkflowConnection[] = [];
-  
-  // Iterate through each source node
-  Object.entries(connections).forEach(([sourceName, sourceData]: [string, any]) => {
-    // Skip if there's no 'main' property or it's not an array
-    if (!sourceData.main || !Array.isArray(sourceData.main)) {
-      return;
-    }
-    
-    // Iterate through source outputs (each is an array of connections)
-    sourceData.main.forEach((outputConnections: any[], sourceOutput: number) => {
-      // Skip if connections is not an array
-      if (!Array.isArray(outputConnections)) {
-        return;
+  // Additional security checks
+  if (validated.nodes) {
+    validated.nodes.forEach((node, index) => {
+      // Sanitize node names
+      node.name = sanitizeString(node.name);
+      
+      // Validate node type against known patterns
+      if (!node.type.startsWith('n8n-nodes-') && !node.type.includes('.')) {
+        throw new Error(`Invalid node type at index ${index}: ${node.type}`);
       }
       
-      // Add each connection to the result
-      outputConnections.forEach((conn: any) => {
-        if (conn && typeof conn === 'object' && conn.node) {
-          result.push({
-            source: sourceName,
-            target: conn.node,
-            sourceOutput,
-            targetInput: conn.index || 0
-          });
-        }
-      });
+      // Deep sanitize parameters if they contain strings
+      if (node.parameters && typeof node.parameters === 'object') {
+        node.parameters = sanitizeObjectStrings(node.parameters);
+      }
+    });
+  }
+  
+  return validated;
+}
+
+/**
+ * Recursively sanitize string values in an object
+ */
+function sanitizeObjectStrings(obj: any): any {
+  if (typeof obj === 'string') {
+    return sanitizeString(obj);
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeObjectStrings(item));
+  }
+  
+  if (obj && typeof obj === 'object') {
+    const sanitized: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Sanitize the key as well
+      const sanitizedKey = sanitizeString(key);
+      sanitized[sanitizedKey] = sanitizeObjectStrings(value);
+    }
+    return sanitized;
+  }
+  
+  return obj;
+}
+
+/**
+ * Legacy function for backward compatibility
+ */
+export function validateWorkflowSpec(spec: any): WorkflowSpec {
+  // Convert legacy input to new format if needed
+  if (spec.connections && Array.isArray(spec.connections)) {
+    spec.connections = transformConnectionsToArray(spec.connections);
+  }
+  
+  // Basic validation for now - this function was already in use
+  if (!spec.name || !spec.nodes) {
+    throw new Error('Workflow must have a name and nodes');
+  }
+  
+  return spec as WorkflowSpec;
+}
+
+/**
+ * Transform legacy connections array to n8n format
+ */
+export function transformConnectionsToArray(connections: LegacyWorkflowConnection[]): any {
+  const connectionMap: any = {};
+  
+  connections.forEach(conn => {
+    if (!connectionMap[conn.source]) {
+      connectionMap[conn.source] = { main: [] };
+    }
+    
+    const sourceOutput = conn.sourceOutput || 0;
+    
+    // Ensure the output array exists
+    while (connectionMap[conn.source].main.length <= sourceOutput) {
+      connectionMap[conn.source].main.push([]);
+    }
+    
+    // Add the connection
+    connectionMap[conn.source].main[sourceOutput].push({
+      node: conn.target,
+      type: 'main',
+      index: conn.targetInput || 0
     });
   });
   
-  return result;
+  return connectionMap;
+}
+
+/**
+ * Rate limiting helper
+ */
+export function createRateLimitMessage(retryAfter?: number): string {
+  const baseMessage = 'Too many requests. Please try again later.';
+  if (retryAfter) {
+    return `${baseMessage} Retry after ${retryAfter} seconds.`;
+  }
+  return baseMessage;
 }

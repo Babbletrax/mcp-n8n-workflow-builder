@@ -10,8 +10,15 @@ import {
   N8NTagResponse,
   N8NTagListResponse
 } from '../types/api';
-import logger from '../utils/logger';
+import logger, { sanitizeForLogging } from '../utils/logger';
 import { validateWorkflowSpec, transformConnectionsToArray } from '../utils/validation';
+import { 
+  validateAccess, 
+  UserPermissions, 
+  OperationType,
+  AuthorizationError,
+  InstanceAccessError
+} from '../utils/security';
 
 export class N8NApiWrapper {
   private envManager: EnvironmentManager;
@@ -21,41 +28,54 @@ export class N8NApiWrapper {
   }
 
   /**
-   * Wrapper for all API calls that handles instance resolution
+   * Wrapper for all API calls that handles instance resolution and security validation
    */
   private async callWithInstance<T>(
+    operation: OperationType,
     instanceSlug: string | undefined,
-    apiCall: () => Promise<T>
+    apiCall: () => Promise<T>,
+    userPermissions?: UserPermissions
   ): Promise<T> {
     try {
-      // Validate instance exists if provided
-      if (instanceSlug && !this.envManager.getAvailableEnvironments().includes(instanceSlug)) {
-        throw new Error(`Instance '${instanceSlug}' not found. Available instances: ${this.envManager.getAvailableEnvironments().join(', ')}`);
-      }
+      const availableInstances = this.envManager.getAvailableEnvironments();
+      
+      // Validate access permissions and instance availability
+      validateAccess(operation, instanceSlug, availableInstances, userPermissions);
 
       return await apiCall();
     } catch (error) {
+      if (error instanceof AuthorizationError || error instanceof InstanceAccessError) {
+        logger.warn('Access denied', { 
+          operation, 
+          instance: instanceSlug, 
+          error: error.message,
+          userPermissions: userPermissions ? sanitizeForLogging(userPermissions) : 'none'
+        });
+        throw error;
+      }
       throw new Error(`API call failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   /**
-   * Helper function to handle API errors consistently
+   * Helper function to handle API errors consistently with sanitization
    */
   private handleApiError(context: string, error: unknown): never {
     logger.error(`API error during ${context}`);
     if (axios.isAxiosError(error)) {
       logger.error(`Status: ${error.response?.status || 'Unknown'}`);
-      logger.error(`Response: ${JSON.stringify(error.response?.data || {})}`);
-      logger.error(`Config: ${JSON.stringify(error.config)}`);
+      logger.error(`Response:`, sanitizeForLogging(error.response?.data || {}));
+      // Sanitize config to remove API keys and sensitive headers
+      const sanitizedConfig = sanitizeForLogging(error.config || {});
+      logger.error(`Config:`, sanitizedConfig);
       throw new Error(`API error ${context}: ${error.message}`);
     }
     throw error instanceof Error ? error : new Error(`Unknown error ${context}: ${String(error)}`);
   }
 
   // Workflow management methods
-  async createWorkflow(workflowInput: WorkflowInput, instanceSlug?: string): Promise<N8NWorkflowResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async createWorkflow(workflowInput: WorkflowInput, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowResponse> {
+    return this.callWithInstance(OperationType.CREATE_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -70,11 +90,11 @@ export class N8NApiWrapper {
       } catch (error) {
         return this.handleApiError(`creating workflow ${workflowInput.name}`, error);
       }
-    });
+    }, userPermissions);
   }
 
-  async getWorkflow(id: string, instanceSlug?: string): Promise<N8NWorkflowResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async getWorkflow(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowResponse> {
+    return this.callWithInstance(OperationType.READ_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -88,8 +108,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async updateWorkflow(id: string, workflowInput: WorkflowInput, instanceSlug?: string): Promise<N8NWorkflowResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async updateWorkflow(id: string, workflowInput: WorkflowInput, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowResponse> {
+    return this.callWithInstance(OperationType.UPDATE_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -105,8 +125,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async deleteWorkflow(id: string, instanceSlug?: string): Promise<any> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async deleteWorkflow(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<any> {
+    return this.callWithInstance(OperationType.DELETE_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -120,8 +140,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async activateWorkflow(id: string, instanceSlug?: string): Promise<N8NWorkflowResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async activateWorkflow(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowResponse> {
+    return this.callWithInstance(OperationType.ACTIVATE_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -139,8 +159,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async deactivateWorkflow(id: string, instanceSlug?: string): Promise<N8NWorkflowResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async deactivateWorkflow(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowResponse> {
+    return this.callWithInstance(OperationType.DEACTIVATE_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -155,8 +175,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async listWorkflows(instanceSlug?: string): Promise<N8NWorkflowSummary[]> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async listWorkflows(instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NWorkflowSummary[]> {
+    return this.callWithInstance(OperationType.READ_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -210,8 +230,8 @@ export class N8NApiWrapper {
   }
 
   // Execution management methods
-  async listExecutions(options: ExecutionListOptions = {}, instanceSlug?: string): Promise<N8NExecutionListResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async listExecutions(options: ExecutionListOptions = {}, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NExecutionListResponse> {
+    return this.callWithInstance(OperationType.READ_EXECUTION, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -225,8 +245,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async getExecution(id: number, includeData?: boolean, instanceSlug?: string): Promise<N8NExecutionResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async getExecution(id: number, includeData?: boolean, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NExecutionResponse> {
+    return this.callWithInstance(OperationType.READ_EXECUTION, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -241,8 +261,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async deleteExecution(id: number, instanceSlug?: string): Promise<N8NExecutionResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async deleteExecution(id: number, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NExecutionResponse> {
+    return this.callWithInstance(OperationType.DELETE_EXECUTION, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -309,8 +329,8 @@ export class N8NApiWrapper {
   }
 
   // Tag management methods
-  async createTag(tag: { name: string }, instanceSlug?: string): Promise<N8NTagResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async createTag(tag: { name: string }, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NTagResponse> {
+    return this.callWithInstance(OperationType.MANAGE_TAGS, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -324,8 +344,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async getTags(options: { limit?: number; cursor?: string } = {}, instanceSlug?: string): Promise<N8NTagListResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async getTags(options: { limit?: number; cursor?: string } = {}, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NTagListResponse> {
+    return this.callWithInstance(OperationType.READ_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -339,8 +359,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async getTag(id: string, instanceSlug?: string): Promise<N8NTagResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async getTag(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NTagResponse> {
+    return this.callWithInstance(OperationType.READ_WORKFLOW, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -354,8 +374,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async updateTag(id: string, tag: { name: string }, instanceSlug?: string): Promise<N8NTagResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async updateTag(id: string, tag: { name: string }, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NTagResponse> {
+    return this.callWithInstance(OperationType.MANAGE_TAGS, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {
@@ -369,8 +389,8 @@ export class N8NApiWrapper {
     });
   }
 
-  async deleteTag(id: string, instanceSlug?: string): Promise<N8NTagResponse> {
-    return this.callWithInstance(instanceSlug, async () => {
+  async deleteTag(id: string, instanceSlug?: string, userPermissions?: UserPermissions): Promise<N8NTagResponse> {
+    return this.callWithInstance(OperationType.MANAGE_TAGS, instanceSlug, async () => {
       const api = this.envManager.getApiInstance(instanceSlug);
       
       try {

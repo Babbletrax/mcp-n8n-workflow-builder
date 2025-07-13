@@ -54,26 +54,26 @@ export async function createWorkflow(workflowInput: WorkflowInput, instanceSlug?
   try {
     const api = envManager.getApiInstance(instanceSlug);
     logger.log(`Creating workflow: ${workflowInput.name}`);
-    // Преобразуем входные данные в формат, принимаемый API
+    // Convert input data to API-accepted format
     const validatedWorkflow = validateWorkflowSpec(workflowInput);
     
-    // Предварительная проверка на типичные проблемы
+    // Preliminary check for typical issues
     validateWorkflowConfiguration(validatedWorkflow);
     
-    // Логгируем данные для отладки
+    // Log data for debugging
     logger.log(`Sending workflow data to API: ${JSON.stringify(validatedWorkflow)}`);
     
     const response = await api.post('/workflows', validatedWorkflow);
     logger.log(`Workflow created with ID: ${response.data.id}`);
     return response.data;
   } catch (error) {
-    // Расширенная обработка ошибок с проверкой типичных случаев
+    // Extended error handling with typical case checking
     if (axios.isAxiosError(error) && error.response?.status) {
       const status = error.response.status;
       const message = error.response?.data?.message;
       
       if (status === 400) {
-        // Проблемы с форматом или структурой данных
+        // Issues with data format or structure
         if (message?.includes('property values')) {
           logger.error(`Validation error with property values: ${message}`);
           throw new Error(`API rejected workflow due to invalid property values. This may happen with complex Set node configurations. Try simplifying the values or using a Code node instead.`);
@@ -114,12 +114,12 @@ export async function createWorkflow(workflowInput: WorkflowInput, instanceSlug?
  * Validates a workflow configuration for common issues
  */
 function validateWorkflowConfiguration(workflow: WorkflowSpec): void {
-  // Проверка на наличие узлов
+  // Check for presence of nodes
   if (!workflow.nodes || workflow.nodes.length === 0) {
     throw new Error('Workflow must contain at least one node');
   }
   
-  // Проверка наличия узлов-триггеров для активации
+  // Check for presence of trigger nodes for activation
   const hasTriggerNode = workflow.nodes.some(node => {
     const nodeType = node.type.toLowerCase();
     return nodeType.includes('trigger') || 
@@ -133,7 +133,7 @@ function validateWorkflowConfiguration(workflow: WorkflowSpec): void {
     logger.warn('Workflow does not contain any trigger nodes. It cannot be activated automatically.');
   }
   
-  // Проверка наличия изолированных узлов без соединений
+  // Check for presence of isolated nodes without connections
   const connectedNodes = new Set<string>();
   Object.keys(workflow.connections).forEach(sourceId => {
     connectedNodes.add(sourceId);
@@ -152,7 +152,7 @@ function validateWorkflowConfiguration(workflow: WorkflowSpec): void {
     logger.warn(`Workflow contains isolated nodes that are not connected: ${isolatedNodeNames}`);
   }
   
-  // Возможно добавить другие проверки (циклы, ошибки в типах узлов и т.д.)
+  // Possibly add other checks (cycles, node type errors, etc.)
 }
 
 /**
@@ -177,7 +177,7 @@ export async function updateWorkflow(id: string, workflowInput: WorkflowInput, i
   try {
     const api = envManager.getApiInstance(instanceSlug);
     logger.log(`Updating workflow with ID: ${id}`);
-    // Преобразуем входные данные в формат, принимаемый API
+    // Convert input data to API-accepted format
     const validatedWorkflow = validateWorkflowSpec(workflowInput);
     
     const response = await api.put(`/workflows/${id}`, validatedWorkflow);
@@ -211,12 +211,12 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
     const api = envManager.getApiInstance(instanceSlug);
     logger.log(`Activating workflow with ID: ${id}`);
     
-    // Получаем текущий рабочий процесс, чтобы получить его полную структуру
+    // Get current workflow to obtain its complete structure
     const workflow = await getWorkflow(id, instanceSlug);
     
-    // Улучшенная проверка наличия узла-триггера с учетом атрибута group
+    // Enhanced check for presence of trigger node considering group attribute
     const hasTriggerNode = workflow.nodes.some(node => {
-      // Проверка по типу узла
+      // Check by node type
       const nodeType = node.type?.toLowerCase() || '';
       const isTypeBasedTrigger = nodeType.includes('trigger') || 
                                 nodeType.includes('webhook') || 
@@ -224,62 +224,62 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
                                 nodeType.includes('interval') ||
                                 nodeType.includes('schedule');
       
-      // Проверка по группе (как в GoogleCalendarTrigger)
+      // Check by group (as in GoogleCalendarTrigger)
       const isTriggerGroup = Array.isArray(node.group) && 
                              node.group.includes('trigger');
       
-      // Узел считается триггером, если соответствует типу или имеет группу trigger
+      // Node is considered a trigger if it matches type or has trigger group
       return isTypeBasedTrigger || isTriggerGroup;
     });
     
     let updatedNodes = [...workflow.nodes];
     let needsUpdate = false;
     
-    // Если нет узла-триггера, добавляем schedule trigger
+    // If no trigger node exists, add schedule trigger
     if (!hasTriggerNode) {
       logger.log('No trigger node found. Adding a schedule trigger node to the workflow.');
       
-      // Найдем минимальную позицию среди существующих узлов
+      // Find minimum position among existing nodes
       const minX = Math.min(...workflow.nodes.map(node => node.position[0] || 0)) - 200;
       const minY = Math.min(...workflow.nodes.map(node => node.position[1] || 0));
       
-      // Создаем уникальный ID для триггера
+      // Create unique ID for trigger
       const triggerId = `ScheduleTrigger_${Date.now()}`;
       
-      // Создаем узел schedule триггера с атрибутами соответствующими GoogleCalendarTrigger
+      // Create schedule trigger node with attributes matching GoogleCalendarTrigger
       const scheduleTrigger = {
         id: triggerId,
         name: "Schedule Trigger",
         type: 'n8n-nodes-base.scheduleTrigger',
         parameters: {
-          interval: 10 // 10 секунд
+          interval: 10 // 10 seconds
         },
         position: [minX, minY],
         typeVersion: 1,
-        // Добавляем важные атрибуты из GoogleCalendarTrigger
+        // Add important attributes from GoogleCalendarTrigger
         group: ['trigger'],
         inputs: [],
         outputs: [
           {
-            type: "main", // Соответствует NodeConnectionType.Main
+            type: "main", // Corresponds to NodeConnectionType.Main
             index: 0
           }
         ]
       };
       
-      // Добавляем триггер в начало массива узлов
+      // Add trigger to beginning of nodes array
       updatedNodes = [scheduleTrigger, ...updatedNodes];
       
-      // Проверим, есть ли хотя бы один узел для соединения с триггером
+      // Check if there's at least one node to connect with trigger
       if (workflow.nodes.length > 0) {
-        // Соединяем триггер с первым узлом
+        // Connect trigger to first node
         if (!workflow.connections) {
           workflow.connections = {};
         }
         
         let firstNodeId = workflow.nodes[0].id;
         
-        // Добавляем соединение от триггера к первому узлу
+        // Add connection from trigger to first node
         if (Array.isArray(workflow.connections)) {
           workflow.connections.push({
             source: triggerId,
@@ -297,30 +297,30 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
       needsUpdate = true;
     }
     
-    // Проверяем, содержит ли процесс узел типа 'Set'
+    // Check if workflow contains a 'Set' type node
     const hasSetNode = workflow.nodes.some(node => 
       node.type === 'n8n-nodes-base.set' || 
       node.type?.includes('set')
     );
     
-    // Если есть узел Set, нам нужно проверить его параметры
+    // If there's a Set node, we need to check its parameters
     if (hasSetNode) {
-      // Исправляем параметры узла 'Set' перед активацией
+      // Fix 'Set' node parameters before activation
       updatedNodes = updatedNodes.map(node => {
         if (node.type === 'n8n-nodes-base.set' || node.type?.includes('set')) {
-          // Убедимся, что параметры узла имеют правильную структуру
+          // Ensure node parameters have correct structure
           const updatedNode = { ...node };
           
-          // Проверяем и исправляем параметры узла Set
+          // Check and fix Set node parameters
           if (updatedNode.parameters && updatedNode.parameters.values) {
-            // Проверяем, что values является массивом
+            // Check that values is an array
             if (!Array.isArray(updatedNode.parameters.values)) {
               updatedNode.parameters.values = [];
             }
             
-            // Проверяем каждый элемент values и исправляем его структуру
+            // Check each values element and fix its structure
             const formattedValues = updatedNode.parameters.values.map((item: any) => {
-              // Убедимся, что каждый элемент имеет свойства name и value
+              // Ensure each element has name and value properties
               return {
                 name: item?.name || 'value',
                 value: item?.value !== undefined ? item.value : '',
@@ -329,7 +329,7 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
               };
             });
             
-            // Полностью заменяем параметры для Set node по формату API n8n
+            // Completely replace parameters for Set node according to n8n API format
             updatedNode.parameters = {
               propertyValues: {
                 itemName: formattedValues
@@ -340,7 +340,7 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
               mode: 'manual'
             };
           } else {
-            // Если параметров нет или нет values, создаем их с правильной структурой
+            // If no parameters or values exist, create them with correct structure
             updatedNode.parameters = {
               propertyValues: {
                 itemName: []
@@ -360,13 +360,13 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
       needsUpdate = true;
     }
     
-    // Обновляем рабочий процесс, если были внесены изменения
+    // Update workflow if changes were made
     if (needsUpdate) {
-      // Преобразуем соединения в формат массива
+      // Transform connections to array format
       const arrayConnections = transformConnectionsToArray(workflow.connections);
       
       try {
-        // Обновляем рабочий процесс с исправленными узлами и соединениями в формате массива
+        // Update workflow with fixed nodes and connections in array format
         await updateWorkflow(id, {
           name: workflow.name,
           nodes: updatedNodes,
@@ -380,11 +380,11 @@ export async function activateWorkflow(id: string, instanceSlug?: string): Promi
       }
     }
     
-    // Активируем рабочий процесс - согласно документации API используем только POST
+    // Activate workflow - according to API documentation use only POST
     try {
       const response = await api.post(`/workflows/${id}/activate`, {});
       
-      // В случае успеха логгируем результат
+      // Log result on success
       logger.log(`Workflow activation response status: ${response.status}`);
       return response.data;
     } catch (activationError) {
@@ -502,7 +502,7 @@ export async function executeWorkflow(id: string, runData?: Record<string, any>,
     const api = envManager.getApiInstance(instanceSlug);
     logger.log(`Manually executing workflow with ID: ${id}`);
     
-    // Проверяем активен ли рабочий процесс
+    // Check if workflow is active
     try {
       const workflow = await getWorkflow(id, instanceSlug);
       
@@ -510,7 +510,7 @@ export async function executeWorkflow(id: string, runData?: Record<string, any>,
         logger.warn(`Workflow ${id} is not active. Attempting to activate it.`);
         try {
           await activateWorkflow(id, instanceSlug);
-          // Ждем существенное время после активации перед выполнением
+          // Wait significant time after activation before execution
           logger.log('Waiting for workflow activation to complete (10 seconds)...');
           await new Promise(resolve => setTimeout(resolve, 10000));
         } catch (activationError) {
@@ -518,7 +518,7 @@ export async function executeWorkflow(id: string, runData?: Record<string, any>,
           throw activationError;
         }
       } else {
-        // Если уже активен, все равно подождем немного для стабильности
+        // If already active, still wait a bit for stability
         logger.log('Workflow is active. Waiting a moment before execution (5 seconds)...');
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
@@ -527,12 +527,12 @@ export async function executeWorkflow(id: string, runData?: Record<string, any>,
       throw checkError;
     }
     
-    // Prepare request data - правильный формат для n8n API
+    // Prepare request data - correct format for n8n API
     const requestData = {
       data: runData || {}
     };
     
-    // Согласно документации n8n API, используем только /execute эндпоинт
+    // According to n8n API documentation, use only /execute endpoint
     const response = await api.post(`/workflows/${id}/execute`, requestData);
     logger.log(`Workflow execution started with /execute endpoint`);
     
@@ -560,7 +560,7 @@ export async function executeWorkflow(id: string, runData?: Record<string, any>,
 }
 
 /**
- * Создает новый тег
+ * Creates a new tag
  */
 export async function createTag(tag: { name: string }, instanceSlug?: string): Promise<N8NTagResponse> {
   try {
@@ -575,7 +575,7 @@ export async function createTag(tag: { name: string }, instanceSlug?: string): P
 }
 
 /**
- * Получает список всех тегов
+ * Gets list of all tags
  */
 export async function getTags(options: { limit?: number; cursor?: string } = {}, instanceSlug?: string): Promise<N8NTagListResponse> {
   try {
@@ -591,7 +591,7 @@ export async function getTags(options: { limit?: number; cursor?: string } = {},
 }
 
 /**
- * Получает тег по ID
+ * Gets tag by ID
  */
 export async function getTag(id: string, instanceSlug?: string): Promise<N8NTagResponse> {
   try {
@@ -606,27 +606,27 @@ export async function getTag(id: string, instanceSlug?: string): Promise<N8NTagR
 }
 
 /**
- * Обновляет тег
+ * Updates a tag
  */
 export async function updateTag(id: string, tag: { name: string }, instanceSlug?: string): Promise<N8NTagResponse> {
   try {
     const api = envManager.getApiInstance(instanceSlug);
     logger.log(`Updating tag with ID: ${id}`);
     
-    // Сначала проверим, существует ли тег с таким именем
+    // First check if tag with this name exists
     try {
       const allTags = await getTags({}, instanceSlug);
       const existingTag = allTags.data.find((t: any) => t.name === tag.name);
       
       if (existingTag) {
         logger.warn(`Tag with name "${tag.name}" already exists. Generating a new unique name.`);
-        // Генерируем более уникальное имя с большим диапазоном случайности
+        // Generate more unique name with larger randomness range
         const uuid = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         tag.name = `${tag.name}-${uuid}`;
       }
     } catch (error) {
       logger.error('Failed to check existing tags', error);
-      // Продолжаем без проверки, если не удалось получить список тегов
+      // Continue without check if failed to get tags list
     }
     
     const response = await api.put(`/tags/${id}`, tag);
@@ -638,7 +638,7 @@ export async function updateTag(id: string, tag: { name: string }, instanceSlug?
 }
 
 /**
- * Удаляет тег
+ * Deletes a tag
  */
 export async function deleteTag(id: string, instanceSlug?: string): Promise<N8NTagResponse> {
   try {

@@ -36,8 +36,10 @@ export class EnvironmentManager {
 
       // Create new axios instance for this environment
       const baseURL = `${envConfig.n8n_host}/api/v1`;
-      console.error(`[DEBUG] Creating API instance with baseURL: ${baseURL}`);
-      console.error(`[DEBUG] API Key: ${envConfig.n8n_api_key?.substring(0, 20)}...`);
+      // Only log baseURL in development mode, never log API keys
+      if (process.env.NODE_ENV === 'development') {
+        console.error(`[DEBUG] Creating API instance with baseURL: ${baseURL}`);
+      }
       
       const apiInstance = axios.create({
         baseURL,

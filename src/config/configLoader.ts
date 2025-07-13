@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { Config, MultiInstanceConfig, N8NInstance } from '../types/config';
+import { validateConfig, validateEnvironmentVariables, sanitizeConfigForLogging } from '../utils/configValidation';
+import { isConfigEncrypted, decryptConfig, getEncryptionPassword } from '../utils/configEncryption';
 
 export class ConfigLoader {
   private static instance: ConfigLoader;
@@ -60,48 +62,54 @@ export class ConfigLoader {
   }
 
   /**
-   * Load configuration from .config.json
+   * Load configuration from .config.json (supports encrypted configs)
    */
   private loadFromJson(configPath: string): MultiInstanceConfig {
     try {
-      const configData = fs.readFileSync(configPath, 'utf8');
-      const parsedConfig: Config = JSON.parse(configData);
-
-      // Validate the config structure
-      if (parsedConfig.environments && parsedConfig.defaultEnv) {
-        // Multi-instance configuration
-        if (!parsedConfig.environments[parsedConfig.defaultEnv]) {
-          throw new Error(`Default environment '${parsedConfig.defaultEnv}' not found in environments`);
-        }
-
-        // Validate all environments have required fields
-        for (const [envName, envConfig] of Object.entries(parsedConfig.environments)) {
-          if (!envConfig.n8n_host || !envConfig.n8n_api_key) {
-            throw new Error(`Environment '${envName}' is missing required fields (n8n_host, n8n_api_key)`);
-          }
-        }
-
-        return {
-          environments: parsedConfig.environments,
-          defaultEnv: parsedConfig.defaultEnv
-        };
-      } else if (parsedConfig.n8n_host && parsedConfig.n8n_api_key) {
-        // Single instance configuration in JSON format
-        return {
-          environments: {
-            'default': {
-              n8n_host: parsedConfig.n8n_host,
-              n8n_api_key: parsedConfig.n8n_api_key
-            }
-          },
-          defaultEnv: 'default'
-        };
-      } else {
-        throw new Error('Invalid configuration format in .config.json');
+      // Check file permissions and size
+      const stats = fs.statSync(configPath);
+      if (stats.size > 1024 * 1024) { // 1MB limit
+        throw new Error('Configuration file is too large (max 1MB)');
       }
+
+      const configData = fs.readFileSync(configPath, 'utf8');
+      let parsedConfig: Config;
+
+      // Check if config is encrypted
+      if (isConfigEncrypted(configPath)) {
+        if (process.env.DEBUG === 'true') {
+          console.error(`[ConfigLoader] Decrypting encrypted configuration from: ${configPath}`);
+        }
+        
+        const encryptionPassword = getEncryptionPassword();
+        parsedConfig = decryptConfig(configData, encryptionPassword);
+        
+        if (process.env.DEBUG === 'true') {
+          console.error(`[ConfigLoader] Successfully decrypted configuration`);
+        }
+      } else {
+        // Plaintext configuration
+        parsedConfig = JSON.parse(configData);
+        
+        if (process.env.NODE_ENV === 'production') {
+          console.warn(`[ConfigLoader] WARNING: Configuration file is not encrypted in production environment`);
+        }
+      }
+
+      // Use comprehensive validation
+      const validatedConfig = validateConfig(parsedConfig);
+
+      if (process.env.NODE_ENV === 'development' && process.env.DEBUG === 'true') {
+        console.error(`[ConfigLoader] Loaded and validated config: ${JSON.stringify(sanitizeConfigForLogging(validatedConfig), null, 2)}`);
+      }
+
+      return validatedConfig;
     } catch (error) {
       if (error instanceof SyntaxError) {
         throw new Error(`Invalid JSON format in .config.json: ${error.message}`);
+      }
+      if (error instanceof Error && error.message?.includes('decryption failed')) {
+        throw new Error(`Configuration decryption failed. Please check CONFIG_ENCRYPTION_PASSWORD environment variable.`);
       }
       throw new Error(`Configuration error: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -119,7 +127,13 @@ export class ConfigLoader {
     
     for (const envPath of envPaths) {
       if (fs.existsSync(envPath)) {
-        if (process.env.DEBUG === 'true') {
+        // Check file size for security
+        const stats = fs.statSync(envPath);
+        if (stats.size > 1024 * 1024) { // 1MB limit
+          throw new Error('.env file is too large (max 1MB)');
+        }
+        
+        if (process.env.NODE_ENV === 'development' && process.env.DEBUG === 'true') {
           console.error(`Loading .env from: ${envPath}`);
         }
         dotenv.config({ path: envPath });
@@ -127,15 +141,11 @@ export class ConfigLoader {
       }
     }
 
-    const n8nHost = process.env.N8N_HOST;
-    const n8nApiKey = process.env.N8N_API_KEY;
-
-    if (!n8nHost || !n8nApiKey) {
-      throw new Error('Missing required environment variables: N8N_HOST and N8N_API_KEY must be set');
-    }
+    // Validate environment variables
+    const { n8nHost, n8nApiKey } = validateEnvironmentVariables();
 
     // Create single instance configuration for backward compatibility
-    return {
+    const config: MultiInstanceConfig = {
       environments: {
         'default': {
           n8n_host: n8nHost,
@@ -144,6 +154,12 @@ export class ConfigLoader {
       },
       defaultEnv: 'default'
     };
+
+    if (process.env.NODE_ENV === 'development' && process.env.DEBUG === 'true') {
+      console.error(`[ConfigLoader] Loaded and validated .env config: ${JSON.stringify(sanitizeConfigForLogging(config), null, 2)}`);
+    }
+
+    return config;
   }
 
   /**

@@ -1,0 +1,76 @@
+services:
+  n8n-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: n8n-mcp-server
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-3456}:3456"
+    environment:
+      # MCP Server Configuration
+      - MCP_STANDALONE=true
+      - MCP_PORT=3456
+      - DEBUG=${DEBUG:-false}
+      
+      # Single-instance configuration (legacy mode)
+      # Uncomment and configure if using .env file
+      # - N8N_HOST=${N8N_HOST}
+      # - N8N_API_KEY=${N8N_API_KEY}
+    
+    volumes:
+      # Mount config file for multi-instance setup
+      - ./.config.json:/app/.config.json:ro
+      
+      # Mount .env file for single-instance setup (optional)
+      # - ./.env:/app/.env:ro
+      
+      # Mount logs directory (optional)
+      - ./logs:/app/logs
+    
+    # Health check configuration
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); const options = { hostname: 'localhost', port: 3456, path: '/health', timeout: 2000 }; const req = http.request(options, (res) => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.end();"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Network configuration
+    networks:
+      - n8n-mcp-network
+
+  # Optional: Add a reverse proxy for HTTPS/domain access
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: n8n-mcp-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - n8n-mcp-server
+  #   networks:
+  #     - n8n-mcp-network
+
+networks:
+  n8n-mcp-network:
+    driver: bridge
+
+# Optional: Add volumes for persistent data
+volumes:
+  mcp_logs:
+    driver: local

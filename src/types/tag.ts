@@ -1,5 +1,5 @@
 /**
- * Интерфейс для тега в n8n
+ * Interface for n8n tag
  */
 export interface Tag {
   id?: string;
@@ -9,9 +9,9 @@ export interface Tag {
 }
 
 /**
- * Интерфейс для списка тегов
+ * Interface for tag list response
  */
 export interface TagListResponse {
   data: Tag[];
   nextCursor?: string | null;
-} 
+}

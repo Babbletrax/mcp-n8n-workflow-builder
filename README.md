@@ -140,9 +140,402 @@ If you cloned the repository or installed as a local dependency, use the followi
 
 The server will start and accept requests via stdio or JSON-RPC depending on the mode.
 
-### 6. Claude App Integration
+## Docker Installation (Recommended for Production)
 
-For integration with Claude App, you need to create a configuration file `cline_mcp_settings.json`. You can copy the example from `cline_mcp_settings.example.json` and edit it:
+### Using Docker Compose
+
+The easiest way to run the n8n Workflow Builder MCP Server is using Docker Compose:
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/salacoste/mcp-n8n-workflow-builder.git
+   cd mcp-n8n-workflow-builder
+   ```
+
+2. **Create your configuration file:**
+   ```bash
+   cp .config.json.example .config.json
+   ```
+
+3. **Edit `.config.json` with your n8n instance details:**
+   ```json
+   {
+     "environments": {
+       "production": {
+         "n8n_host": "https://your-n8n-instance.com/api/v1/",
+         "n8n_api_key": "your_api_key_here"
+       }
+     },
+     "defaultEnv": "production"
+   }
+   ```
+
+4. **Start the Docker container:**
+   ```bash
+   docker-compose up -d
+   ```
+
+5. **Verify the server is running:**
+   ```bash
+   curl http://localhost:3456/health
+   ```
+
+   You should see a response like:
+   ```json
+   {
+     "status": "ok",
+     "message": "MCP server is running",
+     "version": "0.9.0",
+     "timestamp": "2025-07-13T14:10:30.659Z"
+   }
+   ```
+
+### Using Docker Run
+
+Alternatively, you can run the container directly:
+
+```bash
+# Build the image
+docker build -t n8n-workflow-mcp .
+
+# Run the container with volume mount for configuration
+docker run -d \
+  --name n8n-workflow-mcp \
+  -p 0.0.0.0:3456:3456 \
+  -v $(pwd)/.config.json:/app/.config.json:ro \
+  n8n-workflow-mcp
+```
+
+### Claude Desktop Integration with Docker
+
+When the MCP server is running in Docker, you need to configure Claude Desktop to connect to the HTTP endpoint. Here's how:
+
+#### 1. Locate Claude Desktop Configuration
+
+The Claude Desktop configuration file location varies by operating system:
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+#### 2. Configure Claude Desktop for Docker
+
+When Claude Desktop is running on your host machine and needs to connect to the MCP server running inside Docker, you cannot use `localhost`. Instead, use one of these approaches:
+
+**For Windows/Mac (Docker Desktop):**
+
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "npx",
+      "args": [
+        "@anthropic-ai/mcp-client",
+        "http://localhost:3456/mcp"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+**For Linux or if host.docker.internal doesn't work:**
+
+First, find your host machine's IP address:
+- Windows: `ipconfig` (look for IPv4 Address)
+- Mac/Linux: `ifconfig` or `ip addr` (look for your network interface IP)
+
+Then use that IP in the configuration:
+
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "npx",
+      "args": [
+        "@anthropic-ai/mcp-client",
+        "http://YOUR_HOST_IP:3456/mcp"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+Replace `YOUR_HOST_IP` with your actual IP address (e.g., `192.168.1.100`).
+
+#### 3. SSE (Server-Sent Events) Configuration
+
+The MCP server now supports SSE endpoints. To use SSE with Claude Desktop:
+
+**For Windows/Mac (Docker Desktop):**
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway",
+        "--sse",
+        "http://localhost:3456/mcp"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+**For Linux or custom IP:**
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway",
+        "--sse",
+        "http://YOUR_HOST_IP:3456/mcp"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+The SSE endpoint provides real-time server information and supports:
+- Connection status events
+- Method availability notifications
+- Periodic ping/keepalive messages
+- Server capability information
+
+#### 4. Alternative Configuration (Using curl proxy)
+
+If the above method doesn't work, you can use a curl-based proxy approach:
+
+**For Windows/Mac (Docker Desktop):**
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "while IFS= read -r line; do curl -s -X POST -H 'Content-Type: application/json' -d \"$line\" http://host.docker.internal:3456/mcp; done"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+**For Linux or custom IP:**
+```json
+{
+  "mcpServers": {
+    "n8n-workflow-builder": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "while IFS= read -r line; do curl -s -X POST -H 'Content-Type: application/json' -d \"$line\" http://YOUR_HOST_IP:3456/mcp; done"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+#### 4. Using a Local MCP Proxy Script
+
+For the most reliable connection, create a local proxy script:
+
+1. **Create a proxy script `mcp-proxy.js`:**
+   ```javascript
+   #!/usr/bin/env node
+   const { spawn } = require('child_process');
+   const http = require('http');
+   
+   // Forward stdin to HTTP endpoint and stdout back
+   let buffer = '';
+   
+   process.stdin.on('data', (chunk) => {
+     buffer += chunk.toString();
+     const lines = buffer.split('\n');
+     buffer = lines.pop(); // Keep incomplete line in buffer
+     
+     lines.forEach(line => {
+       if (line.trim()) {
+         const postData = line;
+         const options = {
+           hostname: 'host.docker.internal', // or YOUR_HOST_IP for Linux
+           port: 3456,
+           path: '/mcp',
+           method: 'POST',
+           headers: {
+             'Content-Type': 'application/json',
+             'Content-Length': Buffer.byteLength(postData)
+           }
+         };
+   
+         const req = http.request(options, (res) => {
+           let data = '';
+           res.on('data', (chunk) => data += chunk);
+           res.on('end', () => {
+             process.stdout.write(data + '\n');
+           });
+         });
+   
+         req.on('error', (e) => {
+           console.error(`Problem with request: ${e.message}`);
+         });
+   
+         req.write(postData);
+         req.end();
+       }
+     });
+   });
+   
+   process.stdin.on('end', () => {
+     if (buffer.trim()) {
+       // Process any remaining data
+     }
+   });
+   ```
+
+2. **Make the script executable:**
+   ```bash
+   chmod +x mcp-proxy.js
+   ```
+
+3. **Configure Claude Desktop to use the proxy:**
+   ```json
+   {
+     "mcpServers": {
+       "n8n-workflow-builder": {
+         "command": "node",
+         "args": ["/path/to/your/mcp-proxy.js"],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+#### 5. Docker Configuration with Custom Port
+
+If you need to use a different port (to avoid conflicts):
+
+1. **Modify docker-compose.yml:**
+   ```yaml
+   version: '3.8'
+   services:
+     n8n-mcp-server:
+       build: .
+       ports:
+         - "58921:3456"  # Map external port 58921 to internal 3456
+       volumes:
+         - ./.config.json:/app/.config.json:ro
+       environment:
+         - MCP_PORT=3456
+       restart: unless-stopped
+   ```
+
+2. **Update Claude Desktop config:**
+   
+   **For Windows/Mac (Docker Desktop):**
+   ```json
+   {
+     "mcpServers": {
+       "n8n-workflow-builder": {
+         "command": "npx",
+         "args": [
+           "@anthropic-ai/mcp-client",
+           "http://host.docker.internal:58921/mcp"
+         ],
+         "env": {}
+       }
+     }
+   }
+   ```
+   
+   **For Linux or custom IP:**
+   ```json
+   {
+     "mcpServers": {
+       "n8n-workflow-builder": {
+         "command": "npx",
+         "args": [
+           "@anthropic-ai/mcp-client",
+           "http://YOUR_HOST_IP:58921/mcp"
+         ],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+### Docker Environment Variables
+
+You can also configure the server using environment variables in Docker:
+
+```yaml
+version: '3.8'
+services:
+  n8n-mcp-server:
+    build: .
+    ports:
+      - "3456:3456"
+    environment:
+      - N8N_HOST=https://your-n8n-instance.com/api/v1/
+      - N8N_API_KEY=your_api_key_here
+      - MCP_PORT=3456
+      - DEBUG=false
+      - NODE_ENV=production
+    restart: unless-stopped
+```
+
+### Troubleshooting Docker Installation
+
+#### Container Health Check
+
+Check if the container is running properly:
+
+```bash
+# Check container status
+docker ps
+
+# Check container logs
+docker logs n8n-mcp-server
+
+# Check health endpoint
+curl http://localhost:3456/health
+```
+
+#### Common Docker Issues
+
+1. **Port already in use:**
+   ```bash
+   # Change the external port in docker-compose.yml
+   ports:
+     - "58921:3456"  # Use different external port
+   ```
+
+2. **Configuration file not found:**
+   ```bash
+   # Ensure the volume mount is correct
+   volumes:
+     - ./config.json:/app/.config.json:ro
+   ```
+
+3. **Connection refused from Claude Desktop:**
+   - Ensure Docker container is running: `docker ps`
+   - Check firewall settings allow localhost connections
+   - Verify the port mapping in docker-compose.yml
+   - Test the endpoint manually: `curl http://localhost:3456/health`
+
+### Legacy Claude App Integration (Non-Docker)
+
+For integration with Claude App using a local installation, you need to create a configuration file `cline_mcp_settings.json`. You can copy the example from `cline_mcp_settings.example.json` and edit it:
 
 ```bash
 cp cline_mcp_settings.example.json cline_mcp_settings.json
@@ -582,7 +975,19 @@ If you're using a different version of n8n, some API endpoints or node types may
 
 ## Changelog
 
-### 0.8.0 (Current)
+### 0.9.0 (Current)
+- **🏗️ Major Architecture Refactoring** - Complete modularization of the codebase for improved maintainability and scalability
+- Reduced main entry point from 1,279 lines to 18 lines (98.6% reduction)
+- Split into 11 focused modules following single responsibility principle
+- Added comprehensive unit test coverage with Jest
+- Enhanced security features including RBAC, credential sanitization, and configuration encryption
+- Translated all Russian comments to English for international accessibility
+- **📚 Enhanced Docker Documentation** - Added comprehensive Docker installation instructions for Claude Desktop
+- Multiple configuration methods for different deployment scenarios
+- Troubleshooting guides and proxy script examples for reliable Claude Desktop integration
+- Docker Compose and environment variable configuration examples
+
+### 0.8.0
 - **🎉 Multi-instance support** - Manage multiple n8n environments (production, staging, development)
 - Added `.config.json` configuration format for multiple n8n instances
 - All MCP tools now support optional `instance` parameter for environment targeting
